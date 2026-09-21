@@ -2,6 +2,13 @@
 
 # Deep Agents Code Changelog
 
+## [0.1.73](https://github.com/langchain-ai/deepagents/compare/deepagents-code==0.1.72...deepagents-code==0.1.73) (2026-09-21)
+
+
+### Bug Fixes
+
+* **code:** anchor editable refresh to its checkout ([#6455](https://github.com/langchain-ai/deepagents/issues/6455)) ([a6d844d](https://github.com/langchain-ai/deepagents/commit/a6d844d47126bb905f30e76569110cd68294a0b3))
+
 ## [0.1.72](https://github.com/langchain-ai/deepagents/compare/deepagents-code==0.1.71...deepagents-code==0.1.72) (2026-09-21)
 
 ### Features
