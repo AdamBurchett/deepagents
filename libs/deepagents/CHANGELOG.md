@@ -2,6 +2,13 @@
 
 # Deep Agents Changelog
 
+## [0.7.17](https://github.com/langchain-ai/deepagents/compare/deepagents==0.7.16...deepagents==0.7.17) (2026-09-21)
+
+
+### Bug Fixes
+
+* **sdk:** restrict inline file blocks to supported MIME types ([#6447](https://github.com/langchain-ai/deepagents/issues/6447)) ([191e93a](https://github.com/langchain-ai/deepagents/commit/191e93a05e30aad705ee2cb33d5b03e7104dbe5a))
+
 ## [0.7.16](https://github.com/langchain-ai/deepagents/compare/deepagents==0.7.15...deepagents==0.7.16) (2026-09-21)
 
 ### Features
