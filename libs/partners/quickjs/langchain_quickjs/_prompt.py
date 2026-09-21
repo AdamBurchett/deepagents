@@ -8,6 +8,7 @@ import json
 import re
 from typing import TYPE_CHECKING, Any, Literal, get_type_hints
 
+from langchain_core.utils.json_schema import dereference_refs
 from pydantic import TypeAdapter
 
 if TYPE_CHECKING:
@@ -449,7 +450,7 @@ def _safe_json_schema(tool: BaseTool) -> dict[str, Any] | None:
             return None
         model_json_schema = getattr(tool.args_schema, "model_json_schema", None)
         if callable(model_json_schema):
-            return model_json_schema()
+            return dereference_refs(model_json_schema())
     except Exception:  # noqa: BLE001 — prompt rendering is best-effort
         return None
     return None
@@ -485,12 +486,6 @@ def _render_signature(
 # Return types come from the tool's underlying function annotation. We feed
 # the annotation through `pydantic.TypeAdapter` to get a JSON Schema and
 # render it through the same `_json_schema_to_ts` we use for input args.
-# Compound shapes (TypedDict, BaseModel, recursive types) end up as `$ref`
-# in the schema and currently render as `unknown` — same behaviour as
-# nested-model input args. Until that path resolves `$ref` / `$defs`,
-# the simpler unified renderer is the right trade-off here.
-
-
 def _render_return_type(tool: BaseTool) -> str:
     """Render the return annotation as a TS type, defaulting to `unknown`."""
     target = getattr(tool, "func", None) or getattr(tool, "coroutine", None)
@@ -504,14 +499,14 @@ def _render_return_type(tool: BaseTool) -> str:
     if annotation is inspect.Signature.empty or annotation is Any:
         return "unknown"
     try:
-        schema = TypeAdapter(annotation).json_schema()
+        schema = dereference_refs(TypeAdapter(annotation).json_schema())
     except Exception:  # noqa: BLE001 — schema generation is best-effort
         return "unknown"
     return _json_schema_to_ts(schema)
 
 
 def _json_schema_to_ts(prop: dict[str, Any]) -> str:
-    """Shallow JSON-Schema → TS type renderer."""
+    """Render a JSON Schema node as a TypeScript type."""
     if "enum" in prop:
         return " | ".join(json.dumps(v) for v in prop["enum"])
     if "anyOf" in prop:

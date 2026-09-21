@@ -42,6 +42,25 @@ class _Status(BaseModel):
     count: int
 
 
+class _Address(BaseModel):
+    city: str
+    postal_code: str
+
+
+class _User(BaseModel):
+    name: str
+    address: _Address
+
+
+class _Employee(_User):
+    employee_id: int
+
+
+class _TreeNode(BaseModel):
+    name: str
+    children: list[_TreeNode] = Field(default_factory=list)
+
+
 class _UserLookup(TypedDict):
     """Module-scope TypedDict used as a return annotation in PTC tests."""
 
@@ -342,6 +361,53 @@ def test_render_ptc_prompt_uses_signatures() -> None:
     assert "times?: number" in prompt
     # Descriptions from Field(description=...) appear on the fields
     assert "Who to greet" in prompt
+
+
+def test_render_ptc_prompt_resolves_nested_model_input_refs() -> None:
+    class _In(BaseModel):
+        users: list[_User]
+
+    def _fn(users: list[_User]) -> None:
+        del users
+
+    tool = StructuredTool.from_function(
+        name="import_users",
+        description="Import users.",
+        func=_fn,
+        args_schema=_In,
+    )
+
+    prompt = render_ptc_prompt([tool])
+
+    assert (
+        "users: { name: string; address: { city: string; postal_code: string } }[]"
+        in prompt
+    )
+
+
+def test_render_ptc_prompt_resolves_inherited_model_input_refs() -> None:
+    class _In(BaseModel):
+        manager: _Employee
+        reports: list[_Employee]
+
+    def _fn(manager: _Employee, reports: list[_Employee]) -> None:
+        del manager, reports
+
+    tool = StructuredTool.from_function(
+        name="create_team",
+        description="Create a team.",
+        func=_fn,
+        args_schema=_In,
+    )
+
+    prompt = render_ptc_prompt([tool])
+    employee = (
+        "{ name: string; address: { city: string; postal_code: string }; "
+        "employee_id: number }"
+    )
+
+    assert f"manager: {employee}" in prompt
+    assert f"reports: {employee}[]" in prompt
 
 
 def test_render_ptc_prompt_rejects_invalid_js_identifiers() -> None:
@@ -847,10 +913,17 @@ def _stub() -> None:
         # Top-level TypedDict / BaseModel — Pydantic inlines the schema.
         (_UserLookup, "Promise<{ id: number; name: string }>"),
         (_Status, "Promise<{ status: string; count: number }>"),
-        # Compound types that hit `$ref` (collections of TypedDict /
-        # BaseModel) — we don't resolve refs, so they collapse to `unknown`.
-        (list[_UserLookup], "Promise<unknown[]>"),
-        (list[_Status], "Promise<unknown[]>"),
+        # Collections of TypedDict / BaseModel resolve their `$defs` references.
+        (list[_UserLookup], "Promise<{ id: number; name: string }[]>"),
+        (list[_Status], "Promise<{ status: string; count: number }[]>"),
+        # Nested models resolve references recursively.
+        (
+            list[_User],
+            "Promise<{ name: string; "
+            "address: { city: string; postal_code: string } }[]>",
+        ),
+        # Recursive references stop at the recursive edge instead of looping.
+        (_TreeNode, "Promise<{ name: string; children?: unknown[] }>"),
     ],
 )
 def test_render_ptc_prompt_return_types(annotation: Any, expected: str) -> None:
