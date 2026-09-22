@@ -7,17 +7,21 @@ the REPL so one `eval` can orchestrate many tool invocations.
 from __future__ import annotations
 
 import json
-from typing import Any, Literal
+from collections.abc import (
+    Callable,  # noqa: TC003 — get_type_hints resolves return annotations at runtime
+)
+from typing import Annotated, Any, Literal
 
 import pytest
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.types import Command
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model, field_serializer
 from quickjs_rs import Runtime, ThreadWorker
 from typing_extensions import TypedDict
 
 from langchain_quickjs import CodeInterpreterMiddleware
+from langchain_quickjs._format import coerce_tool_output_for_ptc
 from langchain_quickjs._ptc import (
     filter_tools_for_ptc,
     render_ptc_prompt,
@@ -40,6 +44,56 @@ class _Status(BaseModel):
 
     status: str
     count: int
+
+
+class _Address(BaseModel):
+    city: str
+    postal_code: str
+
+
+class _User(BaseModel):
+    name: str
+    address: _Address
+
+
+class _Employee(_User):
+    employee_id: int
+
+
+class _Cat(BaseModel):
+    kind: Literal["cat"]
+    lives: int
+
+
+class _Dog(BaseModel):
+    kind: Literal["dog"]
+    breed: str
+
+
+_Pet = Annotated[_Cat | _Dog, Field(discriminator="kind")]
+
+
+class _TreeNode(BaseModel):
+    name: str
+    children: list[_TreeNode] = Field(default_factory=list)
+
+
+class _WithTypedExtras(BaseModel):
+    model_config = {"extra": "allow"}
+    __pydantic_extra__: dict[str, int] = Field(init=False)
+    name: str
+
+
+class _SerializedStatus(BaseModel):
+    value: int
+
+    @field_serializer("value", return_type=str, when_used="json")
+    def serialize_value(self, value: int) -> str:
+        return str(value)
+
+
+class _AliasedStatus(BaseModel):
+    value: int = Field(alias="external_value")
 
 
 class _UserLookup(TypedDict):
@@ -342,6 +396,315 @@ def test_render_ptc_prompt_uses_signatures() -> None:
     assert "times?: number" in prompt
     # Descriptions from Field(description=...) appear on the fields
     assert "Who to greet" in prompt
+
+
+def test_render_ptc_prompt_shares_complex_types_across_tools() -> None:
+    class _CreateTeamInput(BaseModel):
+        manager: _Employee
+        reports: list[_Employee]
+        pets: dict[str, _Pet]
+        pair: tuple[_User, int]
+
+    class _LookupEmployeeInput(BaseModel):
+        employee_id: int
+
+    def _create_team(
+        manager: _Employee,
+        reports: list[_Employee],
+        pets: dict[str, _Pet],
+        pair: tuple[_User, int],
+    ) -> _TreeNode:
+        del manager, reports, pets, pair
+        return _TreeNode(name="root")
+
+    def _lookup_employee(employee_id: int) -> _Employee:
+        del employee_id
+        return _Employee(
+            name="Ada",
+            address=_Address(city="London", postal_code="SW1"),
+            employee_id=1,
+        )
+
+    tools = [
+        StructuredTool.from_function(
+            name="create_team",
+            description="Create a team.",
+            func=_create_team,
+            args_schema=_CreateTeamInput,
+        ),
+        StructuredTool.from_function(
+            name="lookup_employee",
+            description="Look up an employee.",
+            func=_lookup_employee,
+            args_schema=_LookupEmployeeInput,
+        ),
+    ]
+
+    prompt = render_ptc_prompt(tools)
+
+    assert prompt.count("type Employee =") == 1
+    assert prompt.count("type Address =") == 1
+    assert "manager: Employee" in prompt
+    assert "reports: Employee[]" in prompt
+    assert "pets: Record<string, Cat | Dog>" in prompt
+    assert "pair: [User, number]" in prompt
+    assert "type TreeNode = { name: string; children?: TreeNode[] };" in prompt
+    assert "tools.createTeam(input: CreateTeamInput): Promise<TreeNode>" in prompt
+    assert (
+        "tools.lookupEmployee(input: LookupEmployeeInput): Promise<Employee>" in prompt
+    )
+
+
+def test_render_ptc_prompt_uses_pydantic_collision_names() -> None:
+    first_employee = create_model(
+        "Employee",
+        __module__="alpha.models",
+        name=(str, ...),
+    )
+    second_employee = create_model(
+        "Employee",
+        __module__="beta.models",
+        employee_id=(int, ...),
+    )
+
+    def _first() -> None:
+        return None
+
+    def _second() -> None:
+        return None
+
+    _first.__annotations__["return"] = list[first_employee]
+    _second.__annotations__["return"] = list[second_employee]
+    tools = [
+        StructuredTool.from_function(
+            name="first_tool",
+            description="First tool.",
+            func=_first,
+        ),
+        StructuredTool.from_function(
+            name="second_tool",
+            description="Second tool.",
+            func=_second,
+        ),
+    ]
+
+    prompt = render_ptc_prompt(tools)
+
+    assert "type AlphaModelsEmployee = { name: string };" in prompt
+    assert "Promise<AlphaModelsEmployee[]>" in prompt
+    assert "type BetaModelsEmployee = { employee_id: number };" in prompt
+    assert "Promise<BetaModelsEmployee[]>" in prompt
+
+
+def test_render_ptc_prompt_uses_safe_pydantic_type_names() -> None:
+    promise_model = create_model("Promise", value=(str, ...))
+    record_model = create_model("Record", value=(str, ...))
+    digit_model = create_model("123Model", value=(str, ...))
+
+    def _promise() -> None:
+        return None
+
+    def _record() -> None:
+        return None
+
+    def _digit() -> None:
+        return None
+
+    _promise.__annotations__["return"] = list[promise_model]
+    _record.__annotations__["return"] = list[record_model]
+    _digit.__annotations__["return"] = list[digit_model]
+    tools = [
+        StructuredTool.from_function(
+            name="promise_model",
+            description="Return promise models.",
+            func=_promise,
+        ),
+        StructuredTool.from_function(
+            name="record_model",
+            description="Return record models.",
+            func=_record,
+        ),
+        StructuredTool.from_function(
+            name="digit_model",
+            description="Return digit models.",
+            func=_digit,
+        ),
+    ]
+
+    prompt = render_ptc_prompt(tools)
+
+    assert "type Promise1 = { value: string };" in prompt
+    assert "Promise<Promise1[]>" in prompt
+    assert "type Record1 = { value: string };" in prompt
+    assert "Promise<Record1[]>" in prompt
+    assert "type Model = { value: string };" in prompt
+    assert "Promise<Model[]>" in prompt
+
+
+def test_render_ptc_prompt_supports_raw_schema_fallback() -> None:
+    schema = {
+        "type": "object",
+        "$defs": {
+            "Item": {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+            }
+        },
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/Item"},
+            }
+        },
+        "required": ["items"],
+    }
+
+    def _fn(**_: Any) -> None:
+        return None
+
+    tool = StructuredTool.from_function(
+        name="import_items",
+        description="Import items.",
+        func=_fn,
+        args_schema=schema,
+    )
+
+    prompt = render_ptc_prompt([tool])
+
+    assert "type ImportItemsInputItem" not in prompt
+    assert "input: { items: unknown[] }" in prompt
+
+
+def test_render_ptc_prompt_supports_boolean_schema_nodes() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "allowed": True,
+            "forbidden": False,
+        },
+        "required": ["allowed", "forbidden"],
+    }
+
+    def _fn(**_: Any) -> None:
+        return None
+
+    tool = StructuredTool.from_function(
+        name="boolean_schema",
+        description="Use boolean schemas.",
+        func=_fn,
+        args_schema=schema,
+    )
+
+    prompt = render_ptc_prompt([tool])
+
+    assert "allowed: unknown" in prompt
+    assert "forbidden: never" in prompt
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {},
+        {
+            "$defs": {
+                "Payload": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                }
+            },
+            "$ref": "#/$defs/Payload",
+        },
+    ],
+)
+def test_render_ptc_prompt_uses_default_for_opaque_input_root(
+    schema: dict[str, Any],
+) -> None:
+    def _fn(**_: Any) -> None:
+        return None
+
+    tool = StructuredTool.from_function(
+        name="opaque_input",
+        description="Use an opaque input.",
+        func=_fn,
+        args_schema=schema,
+    )
+
+    prompt = render_ptc_prompt([tool])
+
+    assert "input: Record<string, unknown>" in prompt
+
+
+def test_render_ptc_prompt_widens_typed_additional_properties() -> None:
+    def _fn(value: _WithTypedExtras) -> None:
+        del value
+
+    tool = StructuredTool.from_function(
+        name="typed_extras",
+        description="Use typed extras.",
+        func=_fn,
+    )
+
+    prompt = render_ptc_prompt([tool])
+
+    assert (
+        "type WithTypedExtras = { name: string } & Record<string, number | string>;"
+    ) in prompt
+
+
+def test_render_ptc_prompt_preserves_custom_input_schema() -> None:
+    class _CustomInput(BaseModel):
+        value: str
+        inner: _Address
+
+        @classmethod
+        def model_json_schema(cls, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            schema = super().model_json_schema(*args, **kwargs)
+            schema["description"] = "Custom root description"
+            schema["properties"]["value"]["description"] = "Custom description"
+            return schema
+
+    def _fn(**_: Any) -> None:
+        return None
+
+    tool = StructuredTool.from_function(
+        name="custom_input",
+        description="Use a custom input schema.",
+        func=_fn,
+        args_schema=_CustomInput,
+    )
+
+    prompt = render_ptc_prompt([tool])
+
+    assert "/** Custom description */ value: string" in prompt
+    assert "inner: { city: string; postal_code: string }" in prompt
+
+
+def test_render_ptc_prompt_isolates_invalid_return_schema() -> None:
+    def _invalid() -> Callable[..., str]:
+        return str
+
+    def _valid() -> list[_Status]:
+        return []
+
+    tools = [
+        StructuredTool.from_function(
+            name="invalid",
+            description="Invalid schema.",
+            func=_invalid,
+        ),
+        StructuredTool.from_function(
+            name="valid",
+            description="Valid schema.",
+            func=_valid,
+        ),
+    ]
+
+    prompt = render_ptc_prompt(tools)
+
+    assert "tools.invalid(input: Invalid): Promise<unknown>" in prompt
+    assert "type Status = { status: string; count: number };" in prompt
+    assert "tools.valid(input: Valid): Promise<Status[]>" in prompt
 
 
 def test_render_ptc_prompt_rejects_invalid_js_identifiers() -> None:
@@ -836,21 +1199,20 @@ def _stub() -> None:
         (type(None), "Promise<null>"),
         # Containers of primitives.
         (list[int], "Promise<number[]>"),
-        # `dict[str, V]` uses `additionalProperties` in the schema, which
-        # `_json_schema_to_ts` doesn't currently read — value type collapses
-        # to `unknown`.
-        (dict[str, int], "Promise<Record<string, unknown>>"),
+        (dict[str, int], "Promise<Record<string, number>>"),
         # Optional / Literal / unions all flow through `anyOf` or `enum`.
         (int | None, "Promise<number | null>"),
         (Literal["active", "resolved"], 'Promise<"active" | "resolved">'),
         (int | str, "Promise<number | string>"),
-        # Top-level TypedDict / BaseModel — Pydantic inlines the schema.
-        (_UserLookup, "Promise<{ id: number; name: string }>"),
-        (_Status, "Promise<{ status: string; count: number }>"),
-        # Compound types that hit `$ref` (collections of TypedDict /
-        # BaseModel) — we don't resolve refs, so they collapse to `unknown`.
-        (list[_UserLookup], "Promise<unknown[]>"),
-        (list[_Status], "Promise<unknown[]>"),
+        # Pydantic owns the shared names for referenced model definitions.
+        (_UserLookup, "Promise<UserLookup>"),
+        (_Status, "Promise<Status>"),
+        (list[_UserLookup], "Promise<UserLookup[]>"),
+        (list[_Status], "Promise<Status[]>"),
+        (dict[str, _User], "Promise<Record<string, User>>"),
+        (tuple[_User, int], "Promise<[User, number]>"),
+        (_Pet, "Promise<Cat | Dog>"),
+        (_TreeNode, "Promise<TreeNode>"),
     ],
 )
 def test_render_ptc_prompt_return_types(annotation: Any, expected: str) -> None:
@@ -880,6 +1242,40 @@ def _get_status_record() -> _Status:
     annotation under `from __future__ import annotations`.
     """
     return _Status(status="ok", count=3)
+
+
+def _get_serialized_status() -> _SerializedStatus:
+    return _SerializedStatus(value=7)
+
+
+def _get_aliased_status() -> _AliasedStatus:
+    return _AliasedStatus(external_value=7)
+
+
+@pytest.mark.parametrize(
+    ("name", "function", "expected_output"),
+    [
+        ("get_serialized_status", _get_serialized_status, {"value": 7}),
+        ("get_aliased_status", _get_aliased_status, {"value": 7}),
+    ],
+)
+def test_ambiguous_pydantic_output_schema_falls_back_to_unknown(
+    name: str,
+    function: Callable[[], BaseModel],
+    expected_output: dict[str, Any],
+) -> None:
+    tool = StructuredTool.from_function(
+        name=name,
+        description="Return an ambiguous Pydantic output.",
+        func=function,
+    )
+
+    prompt = render_ptc_prompt([tool])
+    output = coerce_tool_output_for_ptc(function())
+
+    assert f"tools.{to_camel_case(name)}(input:" in prompt
+    assert "): Promise<unknown>" in prompt
+    assert output == expected_output
 
 
 async def test_pydantic_return_arrives_as_object_matching_schema(

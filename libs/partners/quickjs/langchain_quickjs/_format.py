@@ -127,9 +127,8 @@ def _coerce_for_marshal(value: Any) -> Any:
         return {str(k): _coerce_for_marshal(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_coerce_for_marshal(v) for v in value]
-    # Pydantic models are dumped to a plain dict so the JS side sees the
-    # field shape its return-type signature advertises (rather than
-    # `str(model)`). Nested models / datetimes are handled by recursion.
+    # Pydantic models are dumped to a plain dict so the JS side sees their fields.
+    # Nested non-native values are handled by the recursive fallback below.
     if isinstance(value, BaseModel):
         return _coerce_for_marshal(value.model_dump())
     return str(value)

@@ -262,28 +262,30 @@ console.log({ city, normalized });
 ```
 
 ```typescript
+type UserLookup = { id: number; name: string };
+
+type FetchWeather = { city: string };
+
+type FindUsersByName = { name: string };
+
+type GetCityForLocation = { location_id: number };
+
+type GetUserLocation = { user_id: number };
+
+type NormalizeName = { name: string };
+
 /** Find users with the given name. */
-tools.findUsersByName(input: {
-  name: string;
-}): Promise<unknown[]>
+tools.findUsersByName(input: FindUsersByName): Promise<UserLookup[]>
 
 /** Get the location id for a user. */
-tools.getUserLocation(input: {
-  user_id: number;
-}): Promise<number>
+tools.getUserLocation(input: GetUserLocation): Promise<number>
 
 /** Get the city for a location. */
-tools.getCityForLocation(input: {
-  location_id: number;
-}): Promise<string>
+tools.getCityForLocation(input: GetCityForLocation): Promise<string>
 
 /** Normalize a user name for matching. */
-tools.normalizeName(input: {
-  name: string;
-}): Promise<string>
+tools.normalizeName(input: NormalizeName): Promise<string>
 
 /** Fetch the current weather for a city. */
-tools.fetchWeather(input: {
-  city: string;
-}): Promise<string>
+tools.fetchWeather(input: FetchWeather): Promise<string>
 ```

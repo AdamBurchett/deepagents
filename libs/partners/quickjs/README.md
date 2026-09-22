@@ -243,7 +243,7 @@ async tools.searchWeb(input: {
 }): Promise<string>
 ```
 
-Enums, `anyOf` unions, nested objects, and arrays are all supported by the schema renderer. Opaque types fall back to `Record<string, unknown>` — the description is usually enough.
+Enums, unions, nested and recursive objects, arrays, typed mappings, and tuples are supported by the schema renderer. Pydantic v2 supplies one shared definition registry across the exposed tools, deduplicating reused models and qualifying genuine name collisions. Opaque types fall back to `Record<string, unknown>` — the description is usually enough.
 
 ### How it works (so you can debug it)
 
